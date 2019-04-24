@@ -1,6 +1,9 @@
-﻿using System.Collections.ObjectModel;
+﻿using System;
+using System.Collections.ObjectModel;
 using System.Linq;
+using System.Threading.Tasks;
 using CollectionViewChallenge.Extensions;
+using CollectionViewChallenge.Models;
 using CollectionViewChallenge.ValueConverters;
 using Xamarin.Forms;
 
@@ -24,6 +27,7 @@ namespace CollectionViewChallenge.Views
                 : "ciutadella_medium.ttf#Regular";
 
         public CollectionView CollectionView;
+        public Button SaveButton;
         public ObservableCollection<FeedCategory> FeedCategories;
 
         public FeedPreferencesPage()
@@ -35,6 +39,7 @@ namespace CollectionViewChallenge.Views
 
             Content = GetContent();
             SetupBindings();
+            SetupEntranceAnimationSwitcher();
         }
 
         private View GetTitleView()
@@ -89,12 +94,12 @@ namespace CollectionViewChallenge.Views
                             
                             // strangely they don't seem to use their own font here
                             Font = Font.SystemFontOfSize(16, FontAttributes.Bold), 
-                        },
+                        }.Assign(out SaveButton),
                     }
                     .Row(1)
                 } 
             };
-
+            
         private readonly BoolToOpacityConverter boolToOpacityConverter = new BoolToOpacityConverter();
         private View GetCellTemplate()
             => new ContentView 
@@ -159,27 +164,137 @@ namespace CollectionViewChallenge.Views
                             }
                         },
                         Opacity = 0
-                    }.Invoke(x => x.FadeTo(1, 200)) // woof 
+                    }.Invoke(x => 
+                    {
+                        // hack city 1.0
+                        var index = _itemCounter++;
+                        var cvIndex = CollectionViewIndex.For(index -1 /* why? */, ((GridItemsLayout)CollectionView.ItemsLayout).Span);
+
+                        OnItemAppearing(x, cvIndex);
+                    }) 
                 } 
             };
 
-        private void SetupBindings() 
+        // hack city 2.0
+        private static readonly double _sideCoeff = 0.55;
+        private readonly Easing _easing = new Easing((x) => (x - 1) * (x - 1) * ((_sideCoeff + 1) * (x - 1) + _sideCoeff) + 1);
+        private readonly Random r = new Random();
+        private const int XTranslation = 300;
+        private const int YTranslation = 50;
+        private const int AnimationDurationMs = 350;
+        private const float FirstAnimationOffsetS = .025f;
+        private const float DelayPerRowS = .05f;
+        
+        private int _itemCounter;
+        private DateTimeOffset? _firstAnimationTime;
+        private ItemEntranceKind _entranceKind;
+        private void OnItemAppearing(View view, CollectionViewIndex index)
+        {    
+            var now = DateTimeOffset.Now;
+            _firstAnimationTime = _firstAnimationTime ?? now.AddSeconds(FirstAnimationOffsetS);
+            
+            if (_entranceKind == ItemEntranceKind.None)
+            {
+                view.Opacity = 1;
+                return; 
+            } 
+            
+            var translateY = true;
+            var timeOffsetForItem = TimeSpan.FromSeconds(index.RowIndex * DelayPerRowS);
+            var expectedTimeForItem = _firstAnimationTime.Value.Add(timeOffsetForItem);       
+            var timeToWait = expectedTimeForItem - now;
+
+            if (timeToWait < TimeSpan.Zero)
+            {
+                timeToWait = TimeSpan.FromSeconds(FirstAnimationOffsetS);
+                translateY = false; // essentially, 'dont ytranslate things that werent on the screen when we started'
+            }
+
+            var translationX = index.ColIndex == 1 ? XTranslation : -XTranslation;
+            var translationY = (index.RowIndex + 1) * YTranslation;
+
+            switch (_entranceKind)
+            {
+                case ItemEntranceKind.StaggeredFadeUp:
+                    view.TranslationY = translateY ? translationY : 0;
+                    break;
+                     
+                case ItemEntranceKind.StaggeredFadeDown:
+                    view.TranslationY = translateY ? -translationY : 0;
+                    break;                
+                    
+                case ItemEntranceKind.XTranslate:
+                    view.TranslationX = translationX;
+                    break;                
+                    
+                case ItemEntranceKind.CrissCross:
+                    view.TranslationX = -translationX;
+                    break;                
+            }
+            
+            Task.Delay(timeToWait)
+                .ContinueWith(_ =>
+                {
+                    if (_entranceKind.IsOneOf(ItemEntranceKind.CrissCross, ItemEntranceKind.XTranslate))
+                        view.Opacity = 1; // dont fade these ones;
+                
+                    view.TranslateTo(0, 0, AnimationDurationMs, _easing); 
+                    view.FadeTo(1, AnimationDurationMs);     
+                }); 
+        }
+        
+        private void SetupBindings()
         {
-            FeedCategories = 
+            FeedCategories =
                 Enumerable
                     .Range(0, 10) // so we can test with more data 
-                    .SelectMany(_ => _categories.Select(FeedCategory.ForCategory)) 
+                    .SelectMany(_ => _categories.Select(FeedCategory.ForCategory))
                     .ToObservableCollection();
 
             CollectionView.SelectionChanged += (sender, e) =>
             {
                 // this is not so great
                 var selection = e.CurrentSelection.ToSet();
-                foreach (FeedCategory item in FeedCategories) 
-                    item.Selected = selection.Contains(item); 
+                foreach (FeedCategory item in FeedCategories)
+                    item.Selected = selection.Contains(item);
             };
-                        
+
             CollectionView.ItemsSource = FeedCategories;
+        }
+
+        private void SetupEntranceAnimationSwitcher()
+        {
+            var animationKindIndex = 0;
+            var animationKinds =
+                Enum.GetValues(typeof(ItemEntranceKind))
+                    .OfType<ItemEntranceKind>()
+                    .ToList();
+
+            SaveButton.Clicked += async (sender, e) =>
+            {
+                var nextEntranceKind = animationKinds[++animationKindIndex % animationKinds.Count];
+                await ChangeToItemEntranceKind(nextEntranceKind);
+            };
+        }
+
+        private async Task ChangeToItemEntranceKind(ItemEntranceKind entranceKind)
+        {
+            _itemCounter = 0;
+            _firstAnimationTime = null;
+            _entranceKind = entranceKind;
+                
+           if (_entranceKind != ItemEntranceKind.None)
+                await CollectionView.FadeTo(0, 50);
+
+            CollectionView.ItemsSource = null;
+                                
+            Device.BeginInvokeOnMainThread(() =>
+            {
+                CollectionView.Opacity = 1;
+                SaveButton.Text = $"{_entranceKind}";  
+                CollectionView.ItemTemplate = new DataTemplate(() => GetCellTemplate());
+                CollectionView.ItemsSource = FeedCategories.ToList();
+            });
         }
 
         private string[] _categories =

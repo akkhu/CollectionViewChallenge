@@ -21,5 +21,15 @@ namespace CollectionViewChallenge.Extensions
             
         public static HashSet<T> ToSet<T>(this IEnumerable<T> items)
             => new HashSet<T>(items);
+            
+        public static bool IsOneOf<TEnum>(this TEnum item, params TEnum[] comparison)
+            where TEnum : Enum
+        {
+            foreach (var x in comparison)
+                if (Equals(item, x))
+                    return true;
+
+            return false;
+        }
     }
 }
